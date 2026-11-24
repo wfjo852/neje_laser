@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.NejeStudio" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#FF1F1F1F</item>
+    </style>
+</resources>

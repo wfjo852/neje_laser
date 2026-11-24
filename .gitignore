@@ -1,0 +1,12 @@
+# 제조사 원본 앱과 디컴파일 결과 (저작권 — 업로드 금지)
+NEJE*.apk
+decompiled/
+
+# 빌드 산출물
+*.apk
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
