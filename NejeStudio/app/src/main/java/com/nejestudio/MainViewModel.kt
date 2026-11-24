@@ -16,6 +16,7 @@ import com.nejestudio.ble.Protocol
 import com.nejestudio.data.Store
 import com.nejestudio.imaging.Raster
 import com.nejestudio.imaging.TextRenderer
+import com.nejestudio.model.AxisConfig
 import com.nejestudio.model.CanvasItem
 import com.nejestudio.model.Geometry
 import com.nejestudio.model.ItemKind
@@ -53,6 +54,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val geometry: StateFlow<Geometry> = combine(workArea, machine) { wa, m -> Geometry(wa, m) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, Geometry(workArea.value, machine.value))
 
+    val axis = MutableStateFlow(store.loadAxis())
+
+    /** 레이저 헤드의 현재 위치 (논리 기기 좌표, px). 알 수 없으면 null */
+    val headPos = MutableStateFlow<IntArray?>(null)
+    val jogStepMm = MutableStateFlow(5f)
+    val jogging = MutableStateFlow(false)
+
     val presets = MutableStateFlow(store.loadPresets())
     val items = MutableStateFlow<List<CanvasItem>>(emptyList())
     val selectedId = MutableStateFlow<Long?>(null)
@@ -63,6 +71,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val activePresetId = MutableStateFlow<Long?>(null)
 
     val framing = MutableStateFlow(false)
+    /** '위치 확인' 중 헤드가 도는 테두리 (작업 구역 px, [x, y, w, h]) */
+    val frameArea = MutableStateFlow<IntArray?>(null)
     val busy = MutableStateFlow(false)
     val messages = MutableSharedFlow<String>(extraBufferCapacity = 16)
 
@@ -70,7 +80,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var lastUserSettingChange = 0L
     private var settingJob: Job? = null
     private var framingJob: Job? = null
+    private var autoStopJob: Job? = null
     private var lastFrame: IntArray? = null
+
+    // 주의: 아래 init 블록은 생성 중에 바로 실행되므로, init에서 쓰는 속성은 반드시 이 위에 선언할 것
     private val previewCache = HashMap<Long, Pair<String, ImageBitmap>>()
 
     init {
@@ -95,7 +108,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch {
-            ble.connection.collect { if (it != NejeBle.Conn.CONNECTED) framing.value = false }
+            ble.connection.collect {
+                if (it != NejeBle.Conn.CONNECTED) {
+                    framing.value = false
+                    frameArea.value = null
+                    jogging.value = false
+                    headPos.value = null
+                }
+            }
         }
         viewModelScope.launch { items.collectLatest { delay(80); updatePreviews(it) } }
     }
@@ -325,7 +345,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------ 각인
 
-    private class Job2(val image: EncodedImage, val x: Int, val y: Int)
+    /** x, y = 기기로 보낼 좌표. area = 작업 구역 기준 잉크 영역 [x, y, w, h] (화면 표시용) */
+    private class Job2(val image: EncodedImage, val x: Int, val y: Int, val area: IntArray)
+
+    /** 위치 확인 테두리를 영점 기준 mm 문구로 */
+    fun frameLabel(a: IntArray): String {
+        val g = geometry.value
+        val ux = if (g.area.origin.isLeft) a[0] else g.widthPx - a[0] - a[2]
+        val uy = if (g.area.origin.isTop) a[1] else g.heightPx - a[1] - a[3]
+        return "위치 확인 중 · X %.1f mm · Y %.1f mm · %.1f × %.1f mm".format(
+            g.toMm(ux.toFloat()), g.toMm(uy.toFloat()), g.toMm(a[2].toFloat()), g.toMm(a[3].toFloat()),
+        )
+    }
 
     /** 캔버스 전체를 1비트 비트맵 하나로 합성하고 잉크 영역만 잘라낸다 */
     private suspend fun composeJob(): Job2? = withContext(Dispatchers.Default) {
@@ -354,8 +385,109 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (maxX < 0) return@withContext null
         val bw = maxX - minX + 1; val bh = maxY - minY + 1
-        val sub = BooleanArray(bw * bh) { i -> mask[(minY + i / bw) * W + minX + i % bw] }
-        Job2(Protocol.encodeImage(sub, bw, bh), g.deviceLeft + minX, g.deviceTop + minY)
+        val ax = axis.value
+        // 모터 방향 반전 보정: 이미지를 뒤집고 좌표를 반대편 기준으로 바꾼다
+        val sub = BooleanArray(bw * bh) { i ->
+            val sx = if (ax.invertX) bw - 1 - i % bw else i % bw
+            val sy = if (ax.invertY) bh - 1 - i / bw else i / bw
+            mask[(minY + sy) * W + minX + sx]
+        }
+        Job2(
+            Protocol.encodeImage(sub, bw, bh),
+            ax.mapX(g.deviceLeft + minX, bw, g.machine.maxWidth),
+            ax.mapY(g.deviceTop + minY, bh, g.machine.maxHeight),
+            intArrayOf(minX, minY, bw, bh),
+        )
+    }
+
+    fun setAxis(a: AxisConfig) {
+        axis.value = a
+        store.saveAxis(a)
+        headPos.value = null
+    }
+
+    // ------------------------------------------------------------ 헤드 이동 (테스트용)
+    // 기기에 이동 명령이 없으므로 '위치 확인' 명령으로 아주 작은 사각형을 그리게 해서 헤드를 이동시킨다.
+
+    private fun canMoveHead(): Boolean {
+        if (ble.connection.value != NejeBle.Conn.CONNECTED) { messages.tryEmit("먼저 각인기를 연결하세요"); return false }
+        val st = ble.status.value.state
+        if (st == MachineState.CARVING || st == MachineState.PAUSED) { messages.tryEmit("각인 중에는 헤드를 움직일 수 없습니다"); return false }
+        if (busy.value) return false
+        return true
+    }
+
+    /** 영점 모서리의 논리 좌표 */
+    private fun originPos(): IntArray {
+        val g = geometry.value; val m = g.machine
+        return intArrayOf(
+            if (g.area.origin.isLeft) 0 else m.maxWidth - JOG_DOT,
+            if (g.area.origin.isTop) 0 else m.maxHeight - JOG_DOT,
+        )
+    }
+
+    private suspend fun moveHeadTo(x: Int, y: Int) {
+        val g = geometry.value; val m = g.machine
+        val nx = x.coerceIn(0, m.maxWidth - JOG_DOT)
+        val ny = y.coerceIn(0, m.maxHeight - JOG_DOT)
+        if (framing.value) { framingJob?.cancel(); framing.value = false; frameArea.value = null }
+        autoStopJob?.cancel()
+        val prev = headPos.value
+        val ax = axis.value
+        headPos.value = intArrayOf(nx, ny)
+        jogging.value = true
+        val dx = ax.mapX(nx, JOG_DOT, m.maxWidth); val dy = ax.mapY(ny, JOG_DOT, m.maxHeight)
+        ble.send(Protocol.frame(Protocol.FRAME_MODE_PREVIEW, dx, dy, JOG_DOT, JOG_DOT))
+
+        // 작은 사각형을 계속 그리면 모터가 떨리므로, 헤드가 도착할 시간이 지나면 표시를 자동으로 끈다.
+        // 이전 위치를 모르면 기기 전체 대각선 거리만큼 이동한다고 가정한다.
+        val distMm = if (prev != null) {
+            g.toMm(kotlin.math.hypot((nx - prev[0]).toFloat(), (ny - prev[1]).toFloat()))
+        } else g.toMm(kotlin.math.hypot(m.maxWidth.toFloat(), m.maxHeight.toFloat()))
+        val waitMs = (AUTO_STOP_BASE_MS + distMm * AUTO_STOP_MS_PER_MM).toLong().coerceAtMost(AUTO_STOP_MAX_MS)
+        autoStopJob = viewModelScope.launch {
+            delay(waitMs)
+            if (!jogging.value) return@launch
+            jogging.value = false
+            ble.send(Protocol.frame(Protocol.FRAME_MODE_STOP, dx, dy, JOG_DOT, JOG_DOT))
+        }
+    }
+
+    /** dx, dy: 화면 방향 기준 -1/0/1 (오른쪽 = +X, 아래 = +Y) */
+    fun jog(dx: Int, dy: Int) {
+        if (!canMoveHead()) return
+        val g = geometry.value
+        val step = g.toPx(jogStepMm.value).roundToInt().coerceAtLeast(1)
+        val cur = headPos.value ?: originPos()
+        viewModelScope.launch { moveHeadTo(cur[0] + dx * step, cur[1] + dy * step) }
+    }
+
+    /** 레이저 헤드를 영점으로 */
+    fun goHome() {
+        if (!canMoveHead()) return
+        val o = originPos()
+        viewModelScope.launch { moveHeadTo(o[0], o[1]) }
+    }
+
+    /** 이동 표시(약광) 끄기 */
+    fun stopJog() {
+        if (ble.connection.value != NejeBle.Conn.CONNECTED) return
+        val p = headPos.value ?: return
+        val m = geometry.value.machine; val ax = axis.value
+        autoStopJob?.cancel()
+        jogging.value = false
+        viewModelScope.launch {
+            ble.send(Protocol.frame(Protocol.FRAME_MODE_STOP,
+                ax.mapX(p[0], JOG_DOT, m.maxWidth), ax.mapY(p[1], JOG_DOT, m.maxHeight), JOG_DOT, JOG_DOT))
+        }
+    }
+
+    /** 헤드 위치를 영점 기준 mm로 */
+    fun headUserMm(p: IntArray): Pair<Float, Float> {
+        val g = geometry.value; val m = g.machine
+        val ux = if (g.area.origin.isLeft) p[0] else m.maxWidth - JOG_DOT - p[0]
+        val uy = if (g.area.origin.isTop) p[1] else m.maxHeight - JOG_DOT - p[1]
+        return g.toMm(ux.toFloat()) to g.toMm(uy.toFloat())
     }
 
     fun startOrPause() {
@@ -373,6 +505,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 if (framing.value) stopFraming()
+                jogging.value = false
+                headPos.value = null
                 val job = composeJob()
                 if (job == null) { messages.emit("작업 구역 안에 각인할 내용이 없습니다"); return@launch }
                 pushSettings()
@@ -398,11 +532,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (ble.connection.value != NejeBle.Conn.CONNECTED) { messages.tryEmit("먼저 각인기를 연결하세요"); return }
         if (ble.status.value.state == MachineState.CARVING) { messages.tryEmit("각인 중에는 위치 확인을 할 수 없습니다"); return }
         framing.value = true
+        jogging.value = false
+        headPos.value = null
         framingJob = viewModelScope.launch {
-            combine(items, geometry) { a, b -> a to b }.collectLatest {
+            combine(items, geometry, axis) { a, b, c -> Triple(a, b, c) }.collectLatest {
                 delay(250)
                 val job = composeJob()
-                if (job == null) { messages.emit("표시할 내용이 없습니다"); return@collectLatest }
+                if (job == null) { frameArea.value = null; messages.emit("표시할 내용이 없습니다"); return@collectLatest }
+                frameArea.value = job.area
                 val f = intArrayOf(job.x, job.y, job.image.width, job.image.height)
                 if (!f.contentEquals(lastFrame)) {
                     lastFrame = f
@@ -415,9 +552,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun stopFraming() {
         framingJob?.cancel()
         framing.value = false
+        frameArea.value = null
         val f = lastFrame ?: intArrayOf(0, 0, 0, 0)
         lastFrame = null
         ble.send(Protocol.frame(Protocol.FRAME_MODE_STOP, f[0], f[1], f[2], f[3]))
+    }
+
+    companion object {
+        /** 헤드 이동 시 그리는 사각형 크기 (px) */
+        const val JOG_DOT = 2
+
+        /**
+         * 헤드 이동 후 레이저 표시를 자동으로 끄기까지의 대기 시간 = 기본 + 거리(mm) × 값.
+         * 0이면 이동 명령 직후 바로 끈다. 헤드가 목표까지 못 가고 멈추면 값을 늘린다.
+         */
+        const val AUTO_STOP_BASE_MS = 0f
+        const val AUTO_STOP_MS_PER_MM = 0f
+        const val AUTO_STOP_MAX_MS = 6000L
+    }
+
+    /** 헤드 위치를 작업 구역 좌표(px)로. 캔버스 표시용 */
+    fun headInArea(p: IntArray): Offset {
+        val g = geometry.value
+        return Offset(p[0] - g.deviceLeft + JOG_DOT / 2f, p[1] - g.deviceTop + JOG_DOT / 2f)
     }
 
     override fun onCleared() {

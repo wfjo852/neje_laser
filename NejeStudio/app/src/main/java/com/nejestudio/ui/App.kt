@@ -1,8 +1,14 @@
 package com.nejestudio.ui
 
 import android.Manifest
+import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.net.Uri
+import android.provider.MediaStore
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import android.graphics.Bitmap
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -60,6 +66,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nejestudio.MainViewModel
+import com.nejestudio.ble.MachineState
 import com.nejestudio.ble.NejeBle
 import com.nejestudio.imaging.BitmapLoader
 import com.nejestudio.model.ItemKind
@@ -117,6 +124,11 @@ private fun AppContent(vm: MainViewModel, snackbar: SnackbarHostState) {
     val power by vm.power.collectAsState()
     val framing by vm.framing.collectAsState()
     val busy by vm.busy.collectAsState()
+    val axis by vm.axis.collectAsState()
+    val headPos by vm.headPos.collectAsState()
+    val jogStep by vm.jogStepMm.collectAsState()
+    val jogging by vm.jogging.collectAsState()
+    val frameArea by vm.frameArea.collectAsState()
 
     var screen by remember { mutableStateOf<Screen>(Screen.Main) }
     var showScan by remember { mutableStateOf(false) }
@@ -164,11 +176,31 @@ private fun AppContent(vm: MainViewModel, snackbar: SnackbarHostState) {
     }
 
     // ---- 이미지 불러오기
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) scope.launch {
+    fun openImage(uri: Uri?) {
+        if (uri == null) return
+        scope.launch {
             val bmp = withContext(Dispatchers.IO) { BitmapLoader.load(context, uri) }
             if (bmp == null) snackbar.showSnackbar("이미지를 불러올 수 없습니다")
             else screen = Screen.Crop(bmp, null)
+        }
+    }
+    // 1) 갤러리 앱 (삼성 갤러리, 구글 포토 등)
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+        if (r.resultCode == Activity.RESULT_OK) openImage(r.data?.data)
+    }
+    // 2) 파일 앱 (다운로드 폴더, 클라우드 등)
+    val fileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { openImage(it) }
+    // 3) 안드로이드 사진 선택기
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { openImage(it) }
+    var showImageMenu by remember { mutableStateOf(false) }
+
+    fun openGallery() {
+        val intent = Intent(Intent.ACTION_PICK).setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*")
+        try {
+            galleryLauncher.launch(intent)
+        } catch (e: ActivityNotFoundException) {
+            // 갤러리 앱이 없으면 사진 선택기로
+            picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
         }
     }
 
@@ -191,6 +223,8 @@ private fun AppContent(vm: MainViewModel, snackbar: SnackbarHostState) {
                 info = info,
                 setting = deviceSetting,
                 presets = presets,
+                axis = axis,
+                onAxis = vm::setAxis,
                 onWorkArea = vm::setWorkArea,
                 onDeviceSetting = vm::updateDeviceSetting,
                 onDeletePreset = vm::deletePreset,
@@ -241,15 +275,42 @@ private fun AppContent(vm: MainViewModel, snackbar: SnackbarHostState) {
                 onTransform = vm::transform,
                 onResize = vm::setSize,
                 modifier = Modifier.weight(1f).fillMaxWidth().background(Color(0xFFB0BEC5)),
+                head = headPos?.let { vm.headInArea(it) },
+                frame = frameArea,
+                headLabel = when {
+                    conn != NejeBle.Conn.CONNECTED -> null
+                    frameArea != null -> vm.frameLabel(frameArea!!)
+                    headPos == null -> "헤드: 위치 모름 (영점 복귀 필요)"
+                    else -> vm.headUserMm(headPos!!).let { (x, y) ->
+                        "헤드  X %+.1f mm · Y %+.1f mm  ·  %s".format(x, y, if (jogging) "위치 이동 중" else "위치 확인됨")
+                    }
+                },
             )
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FilledTonalButton(onClick = {
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                }) { Text("이미지 추가") }
+                Box {
+                    FilledTonalButton(onClick = { showImageMenu = true }) { Text("이미지 추가") }
+                    DropdownMenu(expanded = showImageMenu, onDismissRequest = { showImageMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("갤러리에서 선택") },
+                            onClick = { showImageMenu = false; openGallery() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("파일에서 선택") },
+                            onClick = { showImageMenu = false; fileLauncher.launch("image/*") },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("사진 선택기") },
+                            onClick = {
+                                showImageMenu = false
+                                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                        )
+                    }
+                }
                 FilledTonalButton(onClick = { textDialog = -1L }) { Text("텍스트 추가") }
                 Spacer(Modifier.weight(1f))
                 Text(
@@ -262,6 +323,7 @@ private fun AppContent(vm: MainViewModel, snackbar: SnackbarHostState) {
                     TabRow(selectedTabIndex = tab) {
                         Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("개체 편집") })
                         Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("각인") })
+                        Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("헤드 이동") })
                     }
                     Column(
                         Modifier.fillMaxWidth().heightIn(max = 330.dp).verticalScroll(rememberScrollState())
@@ -290,6 +352,19 @@ private fun AppContent(vm: MainViewModel, snackbar: SnackbarHostState) {
                                     onDelete = { vm.delete(sel.id) },
                                 )
                             }
+                        } else if (tab == 2) {
+                            val idle = status.state != MachineState.CARVING && status.state != MachineState.PAUSED
+                            JogPanel(
+                                connected = conn == NejeBle.Conn.CONNECTED,
+                                enabled = idle && !busy && upload == NejeBle.Upload.Idle,
+                                originLabel = geometry.area.origin.label,
+                                headMm = headPos?.let { vm.headUserMm(it) },
+                                moving = jogging,
+                                stepMm = jogStep,
+                                onStep = { vm.jogStepMm.value = it },
+                                onJog = vm::jog,
+                                onHome = vm::goHome,
+                            )
                         } else {
                             JobPanel(
                                 connected = conn == NejeBle.Conn.CONNECTED,

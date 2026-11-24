@@ -16,6 +16,15 @@ data class WorkArea(val widthMm: Float = 40f, val heightMm: Float = 40f, val ori
 /** 기기 사양. 연결되면 기기 값으로 갱신되고 저장된다. */
 data class MachineProfile(val maxWidth: Int = 550, val maxHeight: Int = 550, val mmPerPixel: Float = 0.075f)
 
+/**
+ * 모터 방향 반전. 기기에 직접 명령이 없으므로 앱에서 좌표와 이미지를 뒤집어 보정한다.
+ * 논리 좌표(좌상단 = 0,0)를 실제로 기기에 보낼 좌표로 바꾼다.
+ */
+data class AxisConfig(val invertX: Boolean = false, val invertY: Boolean = false) {
+    fun mapX(x: Int, w: Int, maxW: Int) = if (invertX) maxW - x - w else x
+    fun mapY(y: Int, h: Int, maxH: Int) = if (invertY) maxH - y - h else y
+}
+
 data class Preset(val id: Long, val name: String, val carvingTime: Int, val power: Int)
 
 enum class ItemKind { IMAGE, TEXT }

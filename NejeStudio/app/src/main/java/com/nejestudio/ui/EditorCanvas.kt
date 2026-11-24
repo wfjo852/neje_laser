@@ -78,6 +78,12 @@ fun EditorCanvas(
     onTransform: (id: Long, pan: Offset, zoom: Float, centroid: Offset) -> Unit,
     onResize: (id: Long, w: Float, h: Float) -> Unit,
     modifier: Modifier = Modifier,
+    /** 레이저 헤드 위치 (작업 구역 px). null이면 표시 안 함 */
+    head: Offset? = null,
+    /** 헤드 위치 안내 문구 (영점 기준 이동량) */
+    headLabel: String? = null,
+    /** '위치 확인' 중 헤드가 도는 테두리 (작업 구역 px, [x, y, w, h]) */
+    frame: IntArray? = null,
 ) {
     val textMeasurer = rememberTextMeasurer()
     val geo by rememberUpdatedState(geometry)
@@ -223,6 +229,31 @@ fun EditorCanvas(
             drawText(layout, topLeft = Offset(lx + 4f, ly))
         }
 
+        // 위치 확인 테두리 (헤드가 이 선을 따라 돈다)
+        if (frame != null) {
+            val ftl = vm.toScreen(frame[0].toFloat(), frame[1].toFloat())
+            val fsz = Size(frame[2] * vm.scale, frame[3] * vm.scale)
+            val c = Color(0xFFFF6D00)
+            drawRect(c.copy(alpha = 0.08f), ftl, fsz)
+            drawRect(c, ftl, fsz, style = Stroke(2.dp.toPx(),
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))))
+            val corners = listOf(ftl, Offset(ftl.x + fsz.width, ftl.y),
+                Offset(ftl.x + fsz.width, ftl.y + fsz.height), Offset(ftl.x, ftl.y + fsz.height))
+            corners.forEach { drawCircle(c, 3.5.dp.toPx(), it) }
+        }
+
+        // 레이저 헤드 위치 (십자선)
+        if (head != null) {
+            val hp = vm.toScreen(head.x, head.y)
+            val headColor = Color(0xFFFF6D00)
+            val r = 10.dp.toPx()
+            val sw = 2.dp.toPx()
+            drawLine(headColor, Offset(hp.x - r * 1.6f, hp.y), Offset(hp.x + r * 1.6f, hp.y), sw)
+            drawLine(headColor, Offset(hp.x, hp.y - r * 1.6f), Offset(hp.x, hp.y + r * 1.6f), sw)
+            drawCircle(headColor, r, hp, style = Stroke(sw))
+            drawCircle(headColor, 2.5.dp.toPx(), hp)
+        }
+
         // 영점 표시
         val o = geometry.area.origin
         val corner = Offset(
@@ -234,6 +265,22 @@ fun EditorCanvas(
         val zx = if (o.isLeft) corner.x - zl.size.width - 8.dp.toPx() else corner.x + 8.dp.toPx()
         val zy = if (o.isTop) corner.y - zl.size.height else corner.y
         drawText(zl, topLeft = Offset(zx.coerceIn(0f, size.width - zl.size.width), zy.coerceIn(0f, size.height - zl.size.height)))
+    }
+
+    // 헤드 위치 안내
+    if (headLabel != null) {
+        Surface(
+            shape = MaterialTheme.shapes.small,
+            color = Color(0xE6263238),
+            modifier = Modifier.align(Alignment.BottomStart).padding(8.dp),
+        ) {
+            Text(
+                headLabel,
+                style = MaterialTheme.typography.labelMedium,
+                color = Color(0xFFFFB74D),
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            )
+        }
     }
 
     // 확대/축소 버튼

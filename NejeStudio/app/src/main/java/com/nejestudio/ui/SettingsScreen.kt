@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nejestudio.ble.DeviceInfo
 import com.nejestudio.ble.DeviceSetting
+import com.nejestudio.model.AxisConfig
 import com.nejestudio.model.Geometry
 import com.nejestudio.model.Origin
 import com.nejestudio.model.Preset
@@ -54,6 +55,8 @@ fun SettingsScreen(
     info: DeviceInfo?,
     setting: DeviceSetting?,
     presets: List<Preset>,
+    axis: AxisConfig,
+    onAxis: (AxisConfig) -> Unit,
     onWorkArea: (WorkArea) -> Unit,
     onDeviceSetting: ((DeviceSetting) -> DeviceSetting) -> Unit,
     onDeletePreset: (Long) -> Unit,
@@ -119,6 +122,21 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.labelSmall,
             )
 
+            Section("모터 방향")
+            Text(
+                "헤드가 버튼과 반대로 움직이거나 각인 결과가 뒤집혀 나오면 해당 축을 반전하세요. " +
+                    "(앱에서 좌표와 이미지를 뒤집어 보내는 방식입니다)",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("X축(좌우) 반전", Modifier.weight(1f))
+                Switch(checked = axis.invertX, onCheckedChange = { onAxis(axis.copy(invertX = it)) })
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Y축(상하) 반전", Modifier.weight(1f))
+                Switch(checked = axis.invertY, onCheckedChange = { onAxis(axis.copy(invertY = it)) })
+            }
+
             Section("프리셋")
             if (presets.isEmpty()) {
                 Text("저장된 프리셋이 없습니다. 각인 탭에서 '+ 현재 값 저장'을 누르세요.", style = MaterialTheme.typography.bodySmall)
@@ -139,7 +157,10 @@ fun SettingsScreen(
                 Text("각인기를 연결하면 표시됩니다.", style = MaterialTheme.typography.bodySmall)
             } else {
                 if (info.supportsWeakLevel) {
-                    LabeledSlider("약광 밝기 (위치 확인용)", setting.weakLevel.toFloat(), 0f..100f, "${setting.weakLevel}") { v ->
+                    // 최대 10으로 제한해 슬라이더를 덜 민감하게 (1칸 = 1단계)
+                    val weak = setting.weakLevel.coerceIn(0, WEAK_LEVEL_MAX)
+                    LabeledSlider("약광 밝기 (위치 확인용)", weak.toFloat(), 0f..WEAK_LEVEL_MAX.toFloat(),
+                        "$weak / $WEAK_LEVEL_MAX", steps = WEAK_LEVEL_MAX - 1) { v ->
                         onDeviceSetting { it.copy(weakLevel = v.roundToInt()) }
                     }
                 }
@@ -167,6 +188,9 @@ fun SettingsScreen(
         }
     }
 }
+
+/** 약광 밝기 최대값 (기기는 0~100을 받지만 위치 확인용으로는 낮은 값만 사용) */
+private const val WEAK_LEVEL_MAX = 10
 
 private fun round1(v: Float) = (v * 10).toInt() / 10f
 

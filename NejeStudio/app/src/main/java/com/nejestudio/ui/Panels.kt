@@ -32,6 +32,7 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -164,6 +165,8 @@ fun LabeledSlider(
     range: ClosedFloatingPointRange<Float>,
     valueText: String,
     enabled: Boolean = true,
+    /** 0이면 연속, 아니면 눈금 단계 수 */
+    steps: Int = 0,
     onChange: (Float) -> Unit,
 ) {
     Column {
@@ -172,7 +175,7 @@ fun LabeledSlider(
             Spacer(Modifier.weight(1f))
             Text(valueText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
         }
-        Slider(value = value, onValueChange = onChange, valueRange = range, enabled = enabled,
+        Slider(value = value, onValueChange = onChange, valueRange = range, enabled = enabled, steps = steps,
             modifier = Modifier.heightIn(max = 36.dp))
     }
 }
@@ -262,6 +265,89 @@ fun JobPanel(
             ) { Text("중지") }
         }
     }
+}
+
+/** 레이저 헤드 이동 (테스트용) */
+@Composable
+fun JogPanel(
+    connected: Boolean,
+    enabled: Boolean,
+    originLabel: String,
+    headMm: Pair<Float, Float>?,
+    /** true = 이동 명령 진행 중(약광 켜짐), false = 이동 완료(약광 꺼짐) */
+    moving: Boolean,
+    stepMm: Float,
+    onStep: (Float) -> Unit,
+    onJog: (Int, Int) -> Unit,
+    onHome: () -> Unit,
+) {
+    val on = connected && enabled
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        if (headMm != null) {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = if (moving) Color(0xFFFFE0B2) else Color(0xFFC8E6C9),
+            ) {
+                Text(
+                    if (moving) "● 위치 이동 중" else "✔ 위치 확인됨",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (moving) Color(0xFFE65100) else Color(0xFF2E7D32),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                )
+            }
+        }
+        Text(
+            headMm?.let { "헤드 위치: X %.1f mm · Y %.1f mm (영점 %s 기준)".format(it.first, it.second, originLabel) }
+                ?: "헤드 위치: 알 수 없음 — '영점 복귀'를 먼저 누르세요",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("이동 간격", style = MaterialTheme.typography.labelMedium)
+            listOf(0.5f, 1f, 5f, 10f).forEach { s ->
+                FilterChip(selected = stepMm == s, onClick = { onStep(s) }, label = { Text("${fmtStep(s)}mm") })
+            }
+        }
+        // 방향 버튼 (화면 기준: 위 = -Y, 오른쪽 = +X)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Spacer(Modifier.size(64.dp))
+            JogButton("▲", on) { onJog(0, -1) }
+            Spacer(Modifier.size(64.dp))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            JogButton("◀", on) { onJog(-1, 0) }
+            Button(onClick = onHome, enabled = on, modifier = Modifier.size(64.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
+                Text("영점\n복귀", style = MaterialTheme.typography.labelMedium,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            }
+            JogButton("▶", on) { onJog(1, 0) }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Spacer(Modifier.size(64.dp))
+            JogButton("▼", on) { onJog(0, 1) }
+            Spacer(Modifier.size(64.dp))
+        }
+        Text(
+            "※ 기기에 별도 이동 명령이 없어 '위치 확인' 기능으로 헤드를 이동합니다. 이동 직후 약광은 자동으로 꺼집니다.\n" +
+                "※ 방향이 반대로 움직이면 설정 → 모터 방향에서 반전하세요.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private fun fmtStep(s: Float) = if (s % 1f == 0f) s.toInt().toString() else s.toString()
+
+@Composable
+private fun JogButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick, enabled = enabled, modifier = Modifier.size(64.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+    ) { Text(label, style = MaterialTheme.typography.titleLarge) }
 }
 
 // ------------------------------------------------------------------ 대화상자

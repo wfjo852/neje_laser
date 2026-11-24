@@ -1,6 +1,7 @@
 package com.nejestudio.data
 
 import android.content.Context
+import com.nejestudio.model.AxisConfig
 import com.nejestudio.model.MachineProfile
 import com.nejestudio.model.Origin
 import com.nejestudio.model.Preset
@@ -52,6 +53,12 @@ class Store(context: Context) {
             a.put(JSONObject().put("id", it.id).put("name", it.name).put("time", it.carvingTime).put("power", it.power))
         }
         p.edit().putString("presets", a.toString()).apply()
+    }
+
+    fun loadAxis() = AxisConfig(p.getBoolean("inv_x", false), p.getBoolean("inv_y", false))
+
+    fun saveAxis(a: AxisConfig) {
+        p.edit().putBoolean("inv_x", a.invertX).putBoolean("inv_y", a.invertY).apply()
     }
 
     var lastAddress: String?
